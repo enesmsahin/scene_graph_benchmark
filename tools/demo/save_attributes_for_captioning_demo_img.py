@@ -16,12 +16,11 @@ from maskrcnn_benchmark.data.datasets.utils.load_files import \
 from maskrcnn_benchmark.data.datasets.utils.load_files import load_labelmap_file
 from maskrcnn_benchmark.utils.miscellaneous import mkdir
 
-# from tools.demo.detect_utils import detect_objects_on_single_image
-# from tools.demo.visual_utils import draw_bb, draw_rel
-
-from detect_utils import detect_objects_on_single_image
+from detect_utils import detect_objects_on_multiple_images
 from visual_utils import draw_bb, draw_rel
 
+import os
+from tqdm import tqdm
 
 def postprocess_attr(dataset_attr_labelmap, label_list, conf_list):
     common_attributes = {
@@ -45,7 +44,7 @@ def postprocess_attr(dataset_attr_labelmap, label_list, conf_list):
             attr_dict[label_target] = conf
     if len(attr_dict) > 0:
         # the most confident one comes the last
-        sorted_dic = sorted(attr_dict.items(), key=lambda kv: kv[1])
+        sorted_dic = sorted(attr_dict.items(), key=lambda kv: kv[1], reverse=True)
         return list(zip(*sorted_dic))
     else:
         return [[], []]
@@ -74,9 +73,6 @@ def main():
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
-
-    assert op.isfile(args.img_file), \
-        "Image: {} does not exist".format(args.img_file)
 
     output_dir = cfg.OUTPUT_DIR
     mkdir(output_dir)
@@ -115,66 +111,45 @@ def main():
             dataset_allmap['predicate_to_idx'].items()}
 
     transforms = build_transforms(cfg, is_train=False)
-    cv2_img = cv2.imread(args.img_file)
-    dets = detect_objects_on_single_image(model, transforms, cv2_img)
 
-    if isinstance(model, SceneParser):
-        rel_dets = dets['relations']
-        dets = dets['objects']
+    img_ids = []
+    cv2_imgs = []
+    # curr_preds = json.loads(curr_preds)
+    img_path = op.join(args.img_file)
+    cv2_img = cv2.imread(img_path)
+    img_ids.append(img_path)
+    cv2_imgs.append(cv2_img)
 
-    for obj in dets:
-        obj["class"] = dataset_labelmap[obj["class"]]
-    if visual_labelmap is not None:
-        dets = [d for d in dets if d['class'] in visual_labelmap]
-    if cfg.MODEL.ATTRIBUTE_ON and args.visualize_attr:
+    dets_batch = detect_objects_on_multiple_images(model, transforms, cv2_imgs)
+
+    for cv2_img, img_id, dets in zip(cv2_imgs, img_ids, dets_batch):
+        out_line = ""
+        if len(cv2_img.shape) == 2:
+            img_h, img_w = cv2_img.shape
+        else:
+            img_h, img_w, _ = cv2_img.shape
+
         for obj in dets:
-            obj["attr"], obj["attr_conf"] = postprocess_attr(dataset_attr_labelmap, obj["attr"], obj["attr_conf"])
-    if cfg.MODEL.RELATION_ON and args.visualize_relation:
-        for rel in rel_dets:
-            rel['class'] = dataset_relation_labelmap[rel['class']]
-            subj_rect = dets[rel['subj_id']]['rect']
-            rel['subj_center'] = [(subj_rect[0]+subj_rect[2])/2, (subj_rect[1]+subj_rect[3])/2]
-            obj_rect = dets[rel['obj_id']]['rect']
-            rel['obj_center'] = [(obj_rect[0]+obj_rect[2])/2, (obj_rect[1]+obj_rect[3])/2]
+            obj["class"] = dataset_labelmap[obj["class"]]
 
+        if cfg.MODEL.ATTRIBUTE_ON and args.visualize_attr:
+            for obj in dets:
+                obj["attr"], obj["attr_conf"] = postprocess_attr(dataset_attr_labelmap, obj["attr"], obj["attr_conf"])
 
-    rects = [d["rect"] for d in dets]
-    scores = [d["conf"] for d in dets]
-    if cfg.MODEL.ATTRIBUTE_ON and args.visualize_attr:
-        attr_labels = [','.join(d["attr"]) for d in dets]
-        attr_scores = [d["attr_conf"] for d in dets]
-        labels = [attr_label+' '+d["class"]
-                  for d, attr_label in zip(dets, attr_labels)]
-    else:
-        labels = [d["class"] for d in dets]
+        desired_order = ["class", "conf", "rect", "attr", "attr_conf"]
 
-    draw_bb(cv2_img, rects, labels, scores)
+        # assert len(desired_order) == len(dets[0])
 
-    if cfg.MODEL.RELATION_ON and args.visualize_relation:
-        rel_subj_centers = [r['subj_center'] for r in rel_dets]
-        rel_obj_centers = [r['obj_center'] for r in rel_dets]
-        rel_scores = [r['conf'] for r in rel_dets]
-        rel_labels = [r['class'] for r in rel_dets]
-        draw_rel(cv2_img, rel_subj_centers, rel_obj_centers, rel_labels, rel_scores)
-
-    if not args.save_file:
-        save_file = op.splitext(args.img_file)[0] + ".detect.jpg"
-    else:
-        save_file = args.save_file
-    cv2.imwrite(save_file, cv2_img)
-    print("save results to: {}".format(save_file))
-
-    # save results in text
-    if cfg.MODEL.ATTRIBUTE_ON and args.visualize_attr:
-        result_str = ""
-        for label, score, attr_score in zip(labels, scores, attr_scores):
-            result_str += label+'\n'
-            result_str += ','.join([str(conf) for conf in attr_score])
-            result_str += '\t'+str(score)+'\n'
-        text_save_file = op.splitext(save_file)[0] + '.txt'
-        with open(text_save_file, "w") as fid:
-            fid.write(result_str)
-
+        dets = [{key: elem[key] for key in desired_order} for elem in dets]
+        out_dict = {
+            "image_h": img_h,
+            "image_w": img_w,
+            "num_boxes": len(dets),
+            "objects": dets
+        }
+        out_line += json.dumps(out_dict) + "\n"
+        with open(img_id + ".json", "w") as f:
+            f.write(out_line)
 
 if __name__ == "__main__":
     main()
